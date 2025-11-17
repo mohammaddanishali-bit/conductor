@@ -1,0 +1,97 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  conductor-postgres:
+    image: postgres:15
+    container_name: conductor-postgres
+    environment:
+      - POSTGRES_USER=conductor
+      - POSTGRES_PASSWORD=conductor
+      - POSTGRES_DB=conductor
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - conductor-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U conductor"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis (for queues and locks)
+  conductor-redis:
+    image: redis:6.2.3
+    container_name: conductor-redis
+    networks:
+      - conductor-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Conductor API Server
+  conductor-server:
+    image: conductor:server-postgres
+    container_name: conductor-server
+    build:
+      context: ..
+      dockerfile: docker/server/Dockerfile
+    ports:
+      - "8080:8080"
+      - "5000:5000"
+      - "8090:8090"
+    volumes:
+      - ./server/config/config-postgres-redis.properties:/app/config/config.properties:ro
+    networks:
+      - conductor-network
+    depends_on:
+      conductor-postgres:
+        condition: service_healthy
+      conductor-redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    environment:
+      - JAVA_OPTS=-Xms512m -Xmx1024m
+
+  # Conductor Sweeper Service
+  conductor-sweeper:
+    image: conductor:server-postgres
+    container_name: conductor-sweeper
+    volumes:
+      - ./server/config/config-sweeper-service.properties:/app/config/config.properties:ro
+    networks:
+      - conductor-network
+    depends_on:
+      conductor-postgres:
+        condition: service_healthy
+      conductor-redis:
+        condition: service_healthy
+      conductor-server:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    environment:
+      - JAVA_OPTS=-Xms512m -Xmx1024m
+
+networks:
+  conductor-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+    driver: local
+
+#start command
+#  podman-compose -f docker/docker-compose-postgres-redis-distributed.yaml up -d
+#  podman-compose -f docker-compose-postgres-redis-distributed.yaml ps

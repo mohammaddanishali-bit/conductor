@@ -1,0 +1,212 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  conductor-postgres:
+    image: postgres:15
+    container_name: conductor-postgres
+    environment:
+      - POSTGRES_USER=conductor
+      - POSTGRES_PASSWORD=conductor
+      - POSTGRES_DB=conductor
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - conductor-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U conductor"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+        labels: "service=conductor-postgres"
+
+  # Redis (for queues and locks)
+  conductor-redis:
+    image: redis:6.2.3
+    container_name: conductor-redis
+    networks:
+      - conductor-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+        labels: "service=conductor-redis"
+
+  # Conductor API Server
+  conductor-server:
+    image: conductor:server-postgres
+    container_name: conductor-server
+    build:
+      context: ..
+      dockerfile: docker/server/Dockerfile
+    ports:
+      - "8080:8080"
+      - "5000:5000"
+      - "8090:8090"
+    volumes:
+      - ./server/config/config-postgres-redis.properties:/app/config/config.properties:ro
+      - conductor_logs:/app/logs
+    networks:
+      - conductor-network
+    depends_on:
+      conductor-postgres:
+        condition: service_healthy
+      conductor-redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    environment:
+      - JAVA_OPTS=-Xms512m -Xmx1024m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+        labels: "service=conductor-server"
+
+  # Conductor Sweeper Service
+  conductor-sweeper:
+    image: conductor:server-postgres
+    container_name: conductor-sweeper
+    volumes:
+      - ./server/config/config-sweeper-service.properties:/app/config/config.properties:ro
+      - conductor_logs:/app/logs
+    networks:
+      - conductor-network
+    depends_on:
+      conductor-postgres:
+        condition: service_healthy
+      conductor-redis:
+        condition: service_healthy
+      conductor-server:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    environment:
+      - JAVA_OPTS=-Xms512m -Xmx1024m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+        labels: "service=conductor-sweeper"
+
+  # Prometheus - Metrics Collection
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: conductor-prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--web.enable-lifecycle'
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    networks:
+      - conductor-network
+    depends_on:
+      - conductor-server
+      - conductor-sweeper
+    restart: unless-stopped
+
+  # Loki - Log Aggregation
+  loki:
+    image: grafana/loki:2.9.0
+    container_name: conductor-loki
+    command: -config.file=/etc/loki/local-config.yaml
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./observability/loki/loki-config.yaml:/etc/loki/local-config.yaml:ro
+      - loki_data:/loki
+    networks:
+      - conductor-network
+    restart: unless-stopped
+
+  # Promtail - Log Collector
+  promtail:
+    image: grafana/promtail:2.9.0
+    container_name: conductor-promtail
+    command: -config.file=/etc/promtail/config.yml
+    volumes:
+      - ./observability/promtail/promtail-config.yaml:/etc/promtail/config.yml:ro
+      - conductor_logs:/var/log/conductor:ro
+    networks:
+      - conductor-network
+    depends_on:
+      - loki
+    restart: unless-stopped
+
+  # Grafana - Visualization
+  grafana:
+    image: grafana/grafana:latest
+    container_name: conductor-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_SERVER_ROOT_URL=http://localhost:3000
+      - GF_INSTALL_PLUGINS=grafana-piechart-panel
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    networks:
+      - conductor-network
+    depends_on:
+      - prometheus
+      - loki
+    restart: unless-stopped
+
+networks:
+  conductor-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  loki_data:
+    driver: local
+  grafana_data:
+    driver: local
+  conductor_logs:
+    driver: local
+
+# Quick Start Commands:
+# 1. Build: podman-compose -f docker-compose-postgres-redis-observability.yaml build
+# 2. Start: podman-compose -f docker-compose-postgres-redis-observability.yaml up -d
+# 3. View logs: podman-compose -f docker-compose-postgres-redis-observability.yaml logs -f
+# 4. Access:
+#    - Conductor UI: http://localhost:5000
+#    - Conductor API: http://localhost:8080
+#    - Prometheus: http://localhost:9090
+#    - Grafana: http://localhost:3000 (admin/admin)
+#    - Loki: http://localhost:3100
+# 5. Stop: podman-compose -f docker-compose-postgres-redis-observability.yaml down
