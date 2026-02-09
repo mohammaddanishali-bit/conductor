@@ -1133,6 +1133,25 @@ public class WorkflowExecutorOps implements WorkflowExecutor {
             terminate(workflow, twe);
             return workflow;
         } catch (RuntimeException e) {
+            // Log with full context - exception details included in message for log aggregators
+            String errorDetails = String.format(
+                    "Error deciding workflow: workflowId=%s, workflowName=%s, version=%d, status=%s, taskCount=%d, correlationId=%s, exceptionType=%s, exceptionMessage=%s",
+                    workflow.getWorkflowId(),
+                    workflow.getWorkflowName(),
+                    workflow.getWorkflowVersion(),
+                    workflow.getStatus(),
+                    workflow.getTasks().size(),
+                    workflow.getCorrelationId(),
+                    e.getClass().getName(),
+                    e.getMessage());
+            LOGGER.error(errorDetails, e);
+
+            // Also log stack trace as string if exception details aren't showing up
+            if (LOGGER.isDebugEnabled()) {
+                LOGGER.debug("Stack trace for workflow {}: ", workflow.getWorkflowId(), e);
+            }
+            Monitors.error(CLASS_NAME, "decide");
+
             LOGGER.error("Error deciding workflow: {}", workflow.getWorkflowId(), e);
             throw e;
         }
