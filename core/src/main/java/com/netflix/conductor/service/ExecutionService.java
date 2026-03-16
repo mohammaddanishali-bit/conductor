@@ -218,7 +218,6 @@ public class ExecutionService {
             return null;
         }
         Task task = tasks.get(0);
-        ackTaskReceived(task);
         LOGGER.debug(
                 "The Task {} being returned for /tasks/poll/{}?{}&{}",
                 task,
